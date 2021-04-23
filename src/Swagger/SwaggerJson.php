@@ -211,56 +211,67 @@ class SwaggerJson
         $path = str_replace(['{', '}'], '', $path);
         $templates = $this->config->get('apidog.templates', []);
 
-        $resp = [];
+        $respArr = [];
         /** @var ApiResponse $item */
         foreach ($responses as $item) {
-            $resp[$item->code] = [
+            $resp = [
                 'description' => $item->description ?? '',
             ];
-            if ($item->template && Arr::get($templates, $item->template)) {
-                $json = json_encode($templates[$item->template]);
-                if (! $item->schema) {
-                    $item->schema = [];
-                }
-                $template = str_replace('"{template}"', json_encode($item->schema), $json);
-                $item->schema = json_decode($template, true);
-            }
             if ($item->schema) {
                 if (isset($item->schema['$ref'])) {
-                    $resp[$item->code]['schema']['$ref'] = '#/definitions/' . $item->schema['$ref'];
-                    continue;
-                }
+                    $resp['schema']['$ref'] = '#/definitions/' . $item->schema['$ref'];
+                } else {
+                    // 处理直接返回列表的情况 List<Integer> List<String>
+                    if (isset($item->schema[0]) && !is_array($item->schema[0])) {
+                        $resp['schema']['type'] = 'array';
+                        if (is_int($item->schema[0])) {
+                            $resp['schema']['items'] = [
+                                'type' => 'integer',
+                            ];
+                        } elseif (is_string($item->schema[0])) {
+                            $resp['schema']['items'] = [
+                                'type' => 'string',
+                            ];
+                        }
 
-                // 处理直接返回列表的情况 List<Integer> List<String>
-                if (isset($item->schema[0]) && ! is_array($item->schema[0])) {
-                    $resp[$item->code]['schema']['type'] = 'array';
-                    if (is_int($item->schema[0])) {
-                        $resp[$item->code]['schema']['items'] = [
-                            'type' => 'integer',
-                        ];
-                    } elseif (is_string($item->schema[0])) {
-                        $resp[$item->code]['schema']['items'] = [
-                            'type' => 'string',
-                        ];
-                    }
-                    continue;
-                }
-
-                $modelName = implode('', array_map('ucfirst', explode('/', $path))) . ucfirst($method) . 'Response' . $item->code;
-                $ret = $this->responseSchemaToDefinition($item->schema, $modelName);
-                if ($ret) {
-                    // 处理List<String, Object>
-                    if (isset($item->schema[0]) && is_array($item->schema[0])) {
-                        $resp[$item->code]['schema']['type'] = 'array';
-                        $resp[$item->code]['schema']['items']['$ref'] = '#/definitions/' . $modelName;
+                    } elseif (isset($item->schema[0]) && is_array($item->schema[0]) && isset($item->schema[0]['$ref'])) {
+                        $resp['schema']['type']          = 'array';
+                        $resp['schema']['items']['$ref'] = '#/definitions/' . $item->schema[0]['$ref'];
                     } else {
-                        $resp[$item->code]['schema']['$ref'] = '#/definitions/' . $modelName;
+
+                        $modelName = implode('', array_map('ucfirst', explode('/', $path))) . ucfirst($method) . 'Response' . $item->code;
+                        $ret       = $this->responseSchemaToDefinition($item->schema, $modelName);
+                        if ($ret) {
+                            // 处理List<String, Object>
+                            if (isset($item->schema[0]) && is_array($item->schema[0])) {
+                                $resp['schema']['type']          = 'array';
+                                $resp['schema']['items']['$ref'] = '#/definitions/' . $modelName;
+                            } else {
+                                $resp['schema']['$ref'] = '#/definitions/' . $modelName;
+                            }
+                        }
                     }
+
                 }
             }
+
+            if ($item->template && Arr::get($templates, $item->template)) {
+                $res  = $this->handleSchema($templates[$item->template]);
+                $json = json_encode($res);
+
+                if (!$item->schema) {
+                    $template = str_replace('"{template}"', json_encode(['type' => 'object', 'example' => null]), $json);
+                } else {
+                    $template = str_replace('"{template}"', json_encode($resp['schema']), $json);
+                }
+
+                $resp['schema'] = json_decode($template, true);
+            }
+
+            $respArr[$item->code] = $resp;
         }
 
-        return $resp;
+        return (Object)$respArr;
     }
 
     public function makeDefinition($definitions)
@@ -319,47 +330,66 @@ class SwaggerJson
         }
     }
 
-    public function responseSchemaToDefinition($schema, $modelName, $level = 0)
-    {
-        if (! $schema) {
+    public function responseSchemaToDefinition($schema, $modelName, $level = 0) {
+        if (!$schema) {
             return false;
         }
-        $definition = [];
-
         // 处理 Map<String, String> Map<String, Object> Map<String, List>
         $schemaContent = $schema;
         // 处理 List<Map<String, Object>>
         if (isset($schema[0]) && is_array($schema[0])) {
             $schemaContent = $schema[0];
         }
+        $definition = $this->handleSchema($schemaContent, $modelName);
+
+        if ($level === 0) {
+            $this->swagger['definitions'][$modelName] = $definition;
+        }
+
+        return $definition;
+    }
+
+    public function handleSchema($schemaContent, $modelName = '') {
+        $definition = [];
+
         foreach ($schemaContent as $keyString => $val) {
-            $property = [];
-            $property['type'] = gettype($val);
-            if (in_array($property['type'], ['double', 'float'])) {
-                $property['type'] = 'number';
-            }
             $keyArray = explode('|', $keyString);
-            $key = $keyArray[0];
-            $_key = str_replace('_', '', $key);
+            $key      = $keyArray[0];
+            $_key     = str_replace('_', '', $key);
+
+            if ($val === '{template}') {
+                $definition['properties'][$key] = '{template}';
+                continue;
+            }
+            $property = [];
+
             $property['description'] = $keyArray[1] ?? '';
+
+            if ($val !== '{template}') {
+                $property['type'] = gettype($val);
+                if (in_array($property['type'], ['double', 'float'])) {
+                    $property['type'] = 'number';
+                }
+            }
+
             if (is_array($val)) {
                 $definitionName = $modelName . ucfirst($_key);
                 if ($property['type'] === 'array' && isset($val[0])) {
                     if (is_array($val[0])) {
-                        $property['type'] = 'array';
-                        $ret = $this->responseSchemaToDefinition($val[0], $definitionName, 1);
+                        $property['type']          = 'array';
+                        $ret                       = $this->responseSchemaToDefinition($val[0], $definitionName, 1);
                         $property['items']['$ref'] = '#/definitions/' . $definitionName;
                     } else {
-                        $property['type'] = 'array';
-                        $itemType = gettype($val[0]);
+                        $property['type']          = 'array';
+                        $itemType                  = gettype($val[0]);
                         $property['items']['type'] = $itemType;
-                        $property['example'] = [$itemType === 'number' ? 'float' : $itemType];
+                        $property['example']       = [$itemType === 'number' ? 'float' : $itemType];
                     }
                 } else {
                     // definition引用不能有type
                     unset($property['type']);
                     if (count($val) > 0) {
-                        $ret = $this->responseSchemaToDefinition($val, $definitionName, 1);
+                        $ret              = $this->responseSchemaToDefinition($val, $definitionName, 1);
                         $property['$ref'] = '#/definitions/' . $definitionName;
                     } else {
                         $property['$ref'] = '#/definitions/ModelObject';
@@ -374,10 +404,6 @@ class SwaggerJson
             }
 
             $definition['properties'][$key] = $property;
-        }
-
-        if ($level === 0) {
-            $this->swagger['definitions'][$modelName] = $definition;
         }
 
         return $definition;
