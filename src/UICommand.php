@@ -65,10 +65,10 @@ class UICommand extends HyperfCommand
                 }
             }
 
-            \Swoole\Timer::after(1000, function () use ($host, $port) {
-                // TODO win下
-                system(sprintf('open http://%s:%s', $host, $port));
-            });
+//            \Swoole\Timer::after(1000, function () use ($host, $port) {
+//                // TODO win下
+//                system(sprintf('open http://%s:%s', $host, $port));
+//            });
         });
 
         $http->on('request', function ($request, $response) {
